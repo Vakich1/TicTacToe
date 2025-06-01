@@ -22,7 +22,7 @@ current_player = 'X'
 game_over = False
 winner = None
 my_turn = False
-role = None  # 'server' или 'client'
+role = None  # 'server', 'client' или None для локальной игры
 conn = None
 connected = False
 running = True
@@ -36,6 +36,9 @@ rematch_accepted = False
 # Ошибки
 server_error = None  # сообщение об ошибке сервера
 error_time = 0
+
+# Режим игры
+game_mode = None  # 'network' или 'local'
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -59,16 +62,25 @@ def draw_menu():
     screen.blit(title, title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 200)))
     create_text = font.render("Создать игру", True, BLACK)
     connect_text = font.render("Подключиться", True, BLACK)
-    create_rect = create_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 80))
-    connect_rect = connect_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 80))
+    local_text = font.render("Локальная игра", True, BLACK)  # Новая кнопка
+
+    create_rect = create_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 120))
+    connect_rect = connect_text.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+    local_rect = local_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 120))  # Позиция новой кнопки
+
     pygame.draw.rect(screen, (200, 200, 200), create_rect.inflate(40, 40))
     pygame.draw.rect(screen, (200, 200, 200), connect_rect.inflate(40, 40))
+    pygame.draw.rect(screen, (200, 200, 200), local_rect.inflate(40, 40))  # Отрисовка новой кнопки
+
     screen.blit(create_text, create_rect)
     screen.blit(connect_text, connect_rect)
+    screen.blit(local_text, local_rect)  # Отображение текста
+
     if server_error and time.time() - error_time < 3:
         err = small_font.render(server_error, True, (200, 0, 0))
         screen.blit(err, err.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 200)))
-    return create_rect, connect_rect
+
+    return create_rect, connect_rect, local_rect  # Возвращаем все три кнопки
 
 
 # Ожидание подключения
@@ -114,7 +126,7 @@ def draw_rematch_ui():
     pygame.draw.rect(screen, (200, 200, 200), exit_rect.inflate(40, 20))
     screen.blit(rematch_text, rematch_rect)
     screen.blit(exit_text, exit_rect)
-    if rematch_offered_by_opponent:
+    if rematch_offered_by_opponent and game_mode == 'network':
         txt = small_font.render("Соперник предлагает реванш", True, BLACK)
         screen.blit(txt, txt.get_rect(center=(WIDTH // 2, HEIGHT - 240)))
     return rematch_rect, exit_rect
@@ -161,7 +173,13 @@ def reset():
     waiting_for_rematch = False
     rematch_offered_by_opponent = False
     rematch_accepted = False
-    my_turn = (role == 'server')
+
+    # Для сетевой игры устанавливаем чей ход в зависимости от роли
+    if game_mode == 'network':
+        my_turn = (role == 'server')
+    else:
+        # Для локальной игры всегда начинает первый игрок
+        my_turn = True
 
 
 # Сетевая часть
@@ -234,8 +252,9 @@ def send_exit():
 
 
 def return_to_menu():
-    global state, connected, conn, waiting_for_rematch, rematch_offered_by_opponent
-    send_exit()
+    global state, connected, conn, waiting_for_rematch, rematch_offered_by_opponent, game_mode
+    if game_mode == 'network':
+        send_exit()
     state = 'menu'
     connected = False
     if conn:
@@ -243,6 +262,7 @@ def return_to_menu():
     conn = None
     waiting_for_rematch = False
     rematch_offered_by_opponent = False
+    game_mode = None
     reset()
 
 
@@ -284,12 +304,13 @@ def receive_moves():
 
 # Основная функция
 def main():
-    global role, my_turn, current_player, running, waiting_for_rematch, rematch_offered_by_opponent, rematch_accepted, state, connected, conn, server_error
+    global role, my_turn, current_player, running, waiting_for_rematch, rematch_offered_by_opponent, rematch_accepted, state, connected, conn, server_error, game_mode
 
     state = 'menu'
-    create_button, connect_button = draw_menu()
+    create_button, connect_button, local_button = draw_menu()
     pygame.display.flip()
 
+    # Запускаем поток для приема сообщений
     recv_thread = threading.Thread(target=receive_moves, daemon=True)
     recv_thread.start()
 
@@ -304,13 +325,16 @@ def main():
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if state == 'menu':
-                    server_error = None
+                    server_error = None  # Сбрасываем ошибку при новом выборе
                     if create_button.collidepoint(event.pos):
                         role = 'server'
+                        game_mode = 'network'
                         draw_waiting()
                         pygame.display.flip()
+                        # Запускаем сервер в отдельном потоке
                         server_thread = threading.Thread(target=handle_network, daemon=True)
                         server_thread.start()
+                        # Ждем подключения или ошибки
                         start_time = time.time()
                         while not connected and not server_error and time.time() - start_time < 10 and running:
                             time.sleep(0.1)
@@ -320,16 +344,19 @@ def main():
                         if connected:
                             state = 'game'
                             reset()
-                            time.sleep(0.5)
+                            time.sleep(0.5)  # Даем время для синхронизации
                         elif server_error:
                             state = 'menu'
 
                     elif connect_button.collidepoint(event.pos):
                         role = 'client'
+                        game_mode = 'network'
                         draw_waiting()
                         pygame.display.flip()
+                        # Пытаемся подключиться
                         connect_thread = threading.Thread(target=handle_network, daemon=True)
                         connect_thread.start()
+                        # Ждем подключения или ошибки
                         start_time = time.time()
                         while not connected and not server_error and time.time() - start_time < 5 and running:
                             time.sleep(0.1)
@@ -339,46 +366,94 @@ def main():
                         if connected:
                             state = 'game'
                             reset()
-                            time.sleep(0.5)
+                            time.sleep(0.5)  # Даем время для синхронизации
                         elif server_error:
                             state = 'menu'
 
-                elif state == 'game' and my_turn and not game_over:
-                    x, y = event.pos[0] // CELL_SIZE, event.pos[1] // CELL_SIZE
-                    if 0 <= x < 3 and 0 <= y < 3 and not grid[y][x]:
-                        grid[y][x] = current_player
-                        send_move(x, y)
-                        check_winner()
-                        my_turn = False
+                    elif local_button.collidepoint(event.pos):
+                        game_mode = 'local'
+                        state = 'game'
+                        reset()
+
+                elif state == 'game' and not game_over:
+                    # Обработка хода только если:
+                    # - В сетевом режиме и наш ход
+                    # - В локальном режиме всегда
+                    if game_mode == 'local' or (game_mode == 'network' and my_turn):
+                        x, y = event.pos[0] // CELL_SIZE, event.pos[1] // CELL_SIZE
+                        if 0 <= x < 3 and 0 <= y < 3 and not grid[y][x]:
+                            grid[y][x] = current_player
+
+                            # В локальном режиме сразу меняем игрока
+                            if game_mode == 'local':
+                                # Меняем игрока после хода
+                                current_player = 'O' if current_player == 'X' else 'X'
+
+                            # В сетевом режиме отправляем ход
+                            if game_mode == 'network':
+                                send_move(x, y)
+
+                            check_winner()
+
+                            # В сетевом режиме передаем ход
+                            if game_mode == 'network':
+                                my_turn = False
 
                 elif state == 'game' and game_over:
                     rematch_rect, exit_rect = draw_rematch_ui()
                     if rematch_rect.collidepoint(event.pos):
-                        if not waiting_for_rematch and not rematch_offered_by_opponent:
-                            send_rematch_request()
-                            waiting_for_rematch = True
-                        elif rematch_offered_by_opponent:
-                            send_rematch_response(True)
-                            rematch_accepted = True
+                        if game_mode == 'network':
+                            if not waiting_for_rematch and not rematch_offered_by_opponent:
+                                send_rematch_request()
+                                waiting_for_rematch = True
+                            elif rematch_offered_by_opponent:
+                                send_rematch_response(True)
+                                rematch_accepted = True
+                                reset()
+                        else:  # Локальный режим
                             reset()
                     elif exit_rect.collidepoint(event.pos):
+                        if game_mode == 'network' and rematch_offered_by_opponent:
+                            send_rematch_response(False)
                         return_to_menu()
 
         # Отрисовка текущего состояния
         screen.fill(WHITE)
         if state == 'menu':
-            create_button, connect_button = draw_menu()
+            create_button, connect_button, local_button = draw_menu()
         elif state == 'game':
             draw_board()
             if not game_over:
-                draw_status("Ваш ход" if my_turn else "Ход соперника")
+                if game_mode == 'local':
+                    # Для локальной игры показываем, чей сейчас ход
+                    status_text = "Ход крестиков" if current_player == 'X' else "Ход ноликов"
+                    draw_status(status_text)
+                else:  # Сетевой режим
+                    draw_status("Ваш ход" if my_turn else "Ход соперника")
             else:
-                draw_status("Вы выиграли!" if winner == current_player else
-                            ("Ничья!" if winner == 'Ничья' else "Вы проиграли!"))
+                # Формируем текст результата в зависимости от режима
+                if game_mode == 'local':
+                    if winner == 'X':
+                        result_text = "Победили крестики!"
+                    elif winner == 'O':
+                        result_text = "Победили нолики!"
+                    else:
+                        result_text = "Ничья!"
+                else:
+                    if winner == current_player:
+                        result_text = "Вы выиграли!"
+                    elif winner == 'Ничья':
+                        result_text = "Ничья!"
+                    else:
+                        result_text = "Вы проиграли!"
+
+                draw_status(result_text)
                 rematch_rect, exit_rect = draw_rematch_ui()
-                if waiting_for_rematch and not rematch_offered_by_opponent:
-                    txt = small_font.render("Ожидание ответа...", True, BLACK)
-                    screen.blit(txt, txt.get_rect(center=(WIDTH // 2, HEIGHT - 240)))
+
+                if game_mode == 'network':
+                    if waiting_for_rematch and not rematch_offered_by_opponent:
+                        txt = small_font.render("Ожидание ответа...", True, BLACK)
+                        screen.blit(txt, txt.get_rect(center=(WIDTH // 2, HEIGHT - 240)))
 
         pygame.display.flip()
         clock.tick(30)
